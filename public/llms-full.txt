@@ -1,0 +1,10 @@
+# NexVora MV Studio — Documentation
+NexVora MV Studio is a browser-based lyric video studio (Bangla and English UI). Import audio and lyrics (plain text, LRC, word-level LRC), time lyrics line by line or word by word, choose a lyric animation and background, then export MP4 (H.264/AAC) or WebM (VP9/Opus) when the browser supports those encoders.
+
+Features: NexVora Glow (glowing audio-reactive lyrics with particles and waveform), 20 additional lyric animations, custom image/GIF/video backgrounds, local fonts and Google Fonts, waveform timeline, undo/redo, local project saving (IndexedDB) and downloadable .lyricmv project files, transparent lyric-layer WebM export (browser dependent).
+
+Privacy: media is processed on the device. Optional analytics are disabled unless the deployer sets environment variables.
+
+License: AGPL-3.0-only. Derived from UseSuno MV Studio and Folia (folia-major). Source: /source/verse-studio-source.zip
+
+Credits: Developed by Prince AR Abdur Rahman. Published by NexVora Lab's Ofc. (c) 2026 NexVora Lab's Ofc. All Rights Reserved for NexVora-authored modifications; the combined work remains under AGPL-3.0-only.

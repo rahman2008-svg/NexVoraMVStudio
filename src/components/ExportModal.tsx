@@ -1,0 +1,187 @@
+import { estimatedSeconds, rememberThroughput } from '../export/estimates';
+import type { FrameProgress } from '../export/progress';
+import { isValidExportRange } from '../export/range';
+import { useEffect, useRef, useState } from 'react';
+import { ArrowDownToLine, CheckCircle2, CircleAlert, Film, Loader2, Sparkles } from 'lucide-react';
+import { useTranslation } from 'react-i18next';
+import type { PlaybackClock } from '../audio/clock';
+import { dimensions, type Project } from '../domain/model';
+import { downloadBlob } from '../persistence/project';
+import { Modal } from './Modal';
+import { RecordingFocus } from './RecordingFocus';
+import { VideoResult } from './VideoResult';
+import { canExportDirect, canExportFrames, canCompositeProject, recommendsFrameExport, regionCaptureAvailable } from '../export/capabilities';
+import { exportMessage } from '../export/messages';
+import type { AudioAnalysis } from '../audio/analysis';
+import { ensureProjectFont } from '../fonts/fonts';
+import { preventExportExit } from '../export/lifecycle';
+
+export interface ExportArtifact {
+  blob: Blob;
+  filename: string;
+  width: number;
+  height: number;
+  format: 'mp4' | 'webm';
+  createdAt: number;
+}
+// Encoding loads only when the export surface is opened.
+export function ExportModal({ project, buffer, peaks, audioAnalysis, close, clock, artifact, setArtifact, confirmDiscard = true }: { project: Project; buffer: AudioBuffer | null; peaks: number[]; audioAnalysis: AudioAnalysis; clock: PlaybackClock; close: () => void; artifact: ExportArtifact | null; setArtifact: (artifact: ExportArtifact | null) => void; confirmDiscard?: boolean }) {
+  const { t } = useTranslation();
+  const layeredReady = typeof Worker !== 'undefined' && typeof OffscreenCanvas !== 'undefined';
+  const folia = project.template.startsWith('folia-');
+  const isCustomVideo = project.background === 'custom' && project.customBackgroundType === 'video';
+  const isLongCustomVideo = isCustomVideo && (!project.customBackgroundDuration || project.customBackgroundDuration === 0 || project.customBackgroundDuration > 30);
+  const directReady = canExportDirect(project);
+  const frameExportReady = !isLongCustomVideo && (!folia || (canExportFrames(project) && (layeredReady || directReady)));
+  const frameExportPreferred = frameExportReady && (!folia || recommendsFrameExport(project));
+  const [captureMethod, setCaptureMethod] = useState<'standard' | 'native' | 'direct' | 'worker' | 'layered'>(layeredReady ? 'layered' : 'standard');
+  const [captureBackend, setCaptureBackend] = useState('');
+  const [textCache, setTextCache] = useState(project.template === 'folia-tilt' && project.background === 'latent');
+  const useTextCache = textCache && captureMethod === 'layered' && (project.template === 'folia-tilt');
+  const visibleCaptureMethods = [...(layeredReady ? ['layered'] as const : []), ...(directReady ? ['direct'] as const : []), ...(directReady && layeredReady ? ['worker'] as const : [])];
+  useEffect(() => { if (captureMethod === 'standard' && directReady && !layeredReady) { setCaptureMethod('direct'); return; } if (!directReady && (captureMethod === 'direct' || captureMethod === 'worker')) setCaptureMethod(layeredReady ? 'layered' : 'standard'); }, [directReady, captureMethod, layeredReady]);
+  const [height, setHeight] = useState(() => {
+    try { return localStorage.getItem('verse-export-height') === '1080' ? 1080 : 720; } catch { return 720; }
+  }), [format, setFormat] = useState<'mp4' | 'webm'>('mp4'), [mode, setMode] = useState<'offline' | 'realtime'>(frameExportPreferred ? 'offline' : 'realtime');
+  const [transparent, setTransparent] = useState(false);
+  useEffect(() => {
+    try { localStorage.setItem('verse-export-height', String(height)); } catch { /* Export remains usable without storage. */ }
+  }, [height]);
+  const needsRegion = mode === 'realtime' && folia && (project.template !== 'folia-fume' || !canCompositeProject(project));
+  const regionReady = !needsRegion || regionCaptureAvailable();
+  const [range, setRange] = useState({ start: 0, end: project.duration });
+  const [support, setSupport] = useState<{ mp4: boolean; webm: boolean } | null>(null), [error, setError] = useState('');
+  const [running, setRunning] = useState(false), [progress, setProgress] = useState(0), [status, setStatus] = useState('');
+  const [frameStats, setFrameStats] = useState<FrameProgress | undefined>();
+  const [fontReady, setFontReady] = useState<boolean | null>(null);
+  const [hidden, setHidden] = useState(() => document.hidden);
+  useEffect(() => { const update = () => setHidden(document.hidden); document.addEventListener('visibilitychange', update); return () => document.removeEventListener('visibilitychange', update); }, []);
+  const paused = running && mode === 'offline' && hidden;
+  const controller = useRef<AbortController | null>(null);
+  const [w, h] = dimensions(project.ratio, height);
+  useEffect(() => { if (!frameExportReady && !transparent) setMode('realtime'); }, [frameExportReady, transparent]);
+  useEffect(() => {
+    let alive = true; setSupport(null); setError('');
+    const detect = async () => {
+      if (!buffer) throw new Error(t('export.audioMissing'));
+      if (mode === 'offline') { const { supportedFormats } = await import('../export/video'); return supportedFormats(w, h, buffer); }
+      const { recordingMime } = await import('../export/realtime'); return { mp4: !!recordingMime('mp4'), webm: !!recordingMime('webm') };
+    };
+    void detect().then(s => { if (alive) { setSupport(s); if (!s.mp4 && s.webm) setFormat('webm'); } }).catch(e => { if (alive) setError(e.message); });
+    return () => { alive = false; };
+  }, [w, h, buffer, mode]);
+  useEffect(() => () => controller.current?.abort(), []);
+  useEffect(() => { let alive = true; setFontReady(null); void ensureProjectFont(project).then(() => { if (alive) setFontReady(true); }).catch(() => { if (alive) setFontReady(false); }); return () => { alive = false; }; }, [project.font, project.customFontName, project.fontWeight]);
+  const untimedCount = project.lines.filter(l => l.start === null || l.end === null).length;
+  const untimed = untimedCount > 0;
+  const estimated = project.lines.some(l => l.precision === 'estimated');
+  const outOfRange = project.lines.some(l => l.start !== null && l.start + project.offset >= project.duration);
+  const validRange = isValidExportRange(range.start, range.end, project.duration);
+  const codecReady = !!support?.[format];
+  const canExport = !!buffer && !untimed && !outOfRange && validRange && codecReady && fontReady !== null && regionReady && (mode !== 'offline' || frameExportReady);
+  const rangeDuration = Math.max(0, range.end - range.start);
+  const handleContentTargetChange = (isAlpha: boolean) => {
+    setTransparent(isAlpha);
+    if (isAlpha) {
+      setFormat('webm');
+      setMode('offline');
+    }
+  };
+  const start = async () => {
+    if (!buffer || !validRange || controller.current) return;
+    setCaptureBackend(''); setRunning(true); setFrameStats(undefined); setError(''); setProgress(0); setStatus(t('export.preparing')); controller.current = new AbortController();
+    const allowExit = preventExportExit();
+    let lastAverage: number | undefined;
+    let usedFallback = false;
+    const reportBackend = (backend: string) => { if (backend !== captureMethod) usedFallback = true; setCaptureBackend(backend); };
+    try {
+      const options = { captureMethod, textCache: useTextCache, height, fps: 30, start: range.start, end: range.end, format, transparent };
+      const report = (p: number, text: string, frames?: FrameProgress) => { setProgress(p); setStatus(text); setFrameStats(frames); if (frames?.averageFps) lastAverage = frames.averageFps; };
+      const blob = folia ? mode === 'offline' ? await (await import('../export/foliaFrames')).exportFoliaFrames(project, buffer, audioAnalysis, options, clock, controller.current.signal, report, reportBackend) : await (await import('../export/folia')).recordFolia(project, buffer, audioAnalysis, options, clock, controller.current.signal, report) : mode === 'offline' ? await (await import('../export/video')).exportVideo(project, buffer, peaks, options, controller.current.signal, report) : await (await import('../export/realtime')).recordVideo(project, buffer, peaks, options, controller.current.signal, report, clock);
+      if (mode === 'offline' && lastAverage && !usedFallback) rememberThroughput(project, options, lastAverage);
+      const filename = transparent ? `${project.title}_lyrics_alpha.webm` : `${project.title}.${format}`;
+      setArtifact({ blob, filename, width: w, height: h, format, createdAt: Date.now() }); setProgress(1); setStatus(t('export.complete'));
+    } catch (e) { setError(e instanceof Error ? e.message : t('export.failed')); } finally { allowExit(); controller.current = null; setRunning(false); }
+  };
+  const checks = [
+    ...(needsRegion ? [{ ok: regionReady, pending: false, text: exportMessage(regionReady ? 'captureCheck' : 'captureUnavailable') }] : []),
+    { ok: !!buffer, pending: false, text: buffer ? t('export.audioOk') : t('export.audioMissing') },
+    { ok: true, pending: false, text: project.lines.length ? t('export.lyricsOk', { count: project.lines.length }) : t('export.instrumental') },
+    { ok: !untimed && !outOfRange, pending: false, text: untimed ? t('export.timingMissing', { count: untimedCount }) : outOfRange ? t('export.outOfRangeShort') : t('export.timingOk') },
+    { ok: validRange, pending: false, text: validRange ? t('export.rangeOk', { duration: rangeDuration.toFixed(1), frames: Math.ceil(rangeDuration * 30) }) : t('export.rangeInvalid') },
+    { ok: fontReady !== false, pending: fontReady === null, text: fontReady === null ? t('export.fontChecking') : fontReady ? t('export.fontOk') : t('export.fontError') },
+    { ok: codecReady, pending: support === null, text: support === null ? t('export.codecChecking') : transparent ? (format === 'webm' && codecReady ? 'WebM Alpha (32-bit RGBA)' : t('export.codecError')) : codecReady ? t('export.codecOk', { format: format.toUpperCase() }) : t('export.codecError') },
+  ];
+  if (running && mode === 'realtime') return <Modal title={t('export.realtimeLabel')} close={close} busy className="recording-dialog"><RecordingFocus progress={progress} duration={rangeDuration} status={status === exportMessage('recording') ? t('export.recordingLabel') : status} cancel={() => controller.current?.abort()}/></Modal>;
+  return <Modal title={t('export.title')} close={close} busy={running} className="export-dialog"><div className="export-dialog-body">
+    <div className="export-summary">
+      <div className="export-summary-icon">{transparent ? <Sparkles size={22}/> : <Film size={22}/>}</div>
+      <div className="export-summary-info">
+        <strong>{project.title}</strong>
+        <p>{w} × {h} · 30 fps · {t('export.containsAudio')}</p>
+        <div className="export-summary-tags">
+          <span className="export-tag">{height}p {height === 1080 ? 'FHD' : 'HD'}</span>
+          <span className="export-tag">30 FPS</span>
+          <span className="export-tag">{format.toUpperCase()}</span>
+          {transparent && <span className="export-tag alpha"><Sparkles size={11}/> {t('export.alphaTag')}</span>}
+        </div>
+      </div>
+    </div>
+    <div className="export-layout"><section className="export-settings" aria-labelledby="export-settings-title"><h3 id="export-settings-title">{t('export.settingsTitle')}</h3><fieldset disabled={running}>
+    <fieldset className="export-target-control"><legend>{t('export.contentTitle')}</legend><div className="export-target-options">
+      <label className="export-target-card">
+        <input type="radio" name="export-target" checked={!transparent} onChange={() => handleContentTargetChange(false)}/>
+        <div className="export-target-head"><Film size={16}/><strong>{t('export.contentFull')}</strong></div>
+        <span className="export-target-desc">{t('export.fullDesc')}</span>
+      </label>
+      <label className="export-target-card">
+        <input type="radio" name="export-target" checked={transparent} onChange={() => handleContentTargetChange(true)}/>
+        <div className="export-target-head"><Sparkles size={16}/><strong>{t('export.contentTransparent')}</strong><span className="export-badge">{t('export.alphaBadge')}</span></div>
+        <span className="export-target-desc">{t('export.transparentDesc')}</span>
+      </label>
+    </div>
+    {transparent && <div className="export-alpha-banner"><Sparkles size={16}/><p>{t('export.transparentWebMOnly')}</p></div>}
+    </fieldset>
+
+    <div className="form-row">
+      <div className="export-segmented-label"><span>{t('export.resolution')}</span>
+        <div className="export-segmented-group">
+          <button type="button" className={`export-segmented-btn ${height === 720 ? 'active' : ''}`} onClick={() => setHeight(720)}>720p · {t('export.standard')}</button>
+          <button type="button" className={`export-segmented-btn ${height === 1080 ? 'active' : ''}`} onClick={() => setHeight(1080)}>1080p · {t('export.hd')}</button>
+        </div>
+      </div>
+      <div className="export-segmented-label"><span>{t('export.format')}</span>
+        <div className="export-segmented-group">
+          <button type="button" className={`export-segmented-btn ${format === 'mp4' ? 'active' : ''}`} disabled={transparent || !support?.mp4} onClick={() => setFormat('mp4')} title={transparent ? t('export.transparentWebMOnly') : undefined}>MP4{transparent ? ` (${t('export.webmOnlyShort')})` : ''}</button>
+          <button type="button" className={`export-segmented-btn ${format === 'webm' ? 'active' : ''}`} disabled={!support?.webm} onClick={() => setFormat('webm')}>WebM{transparent ? ' (Alpha)' : ''}</button>
+        </div>
+      </div>
+    </div>
+    <fieldset className="export-mode-control"><legend>{t('export.method')}</legend><div className="export-mode-options"><label><input type="radio" name="export-mode" value="offline" checked={mode === 'offline'} disabled={!frameExportReady && !transparent} onChange={() => setMode('offline')}/><span>{t('export.offline')}{frameExportPreferred && <small>{t('export.recommended')}</small>}</span></label><label><input type="radio" name="export-mode" value="realtime" checked={mode === 'realtime'} disabled={transparent} onChange={() => setMode('realtime')}/><span>{t('export.realtimeLabel')}{transparent ? <small>{t('export.transparentRequiresFrames')}</small> : (!frameExportPreferred && <small>{t('export.recommended')}</small>)}</span></label></div></fieldset>
+    {folia && !isLongCustomVideo && !transparent && <p className="field-note export-strategy-note">{t(frameExportPreferred ? 'export.framePreferred' : 'export.realtimePreferred')}</p>}
+    {isLongCustomVideo && !transparent && <p className="field-note export-strategy-note">{t('export.longVideoNotice')}</p>}
+    {mode === 'offline' && project.template.startsWith('folia-') && <><label className="form-label">{t('export.captureMethod')}{visibleCaptureMethods.length > 1 ? <select value={captureMethod} onChange={e => setCaptureMethod(e.target.value as typeof captureMethod)}>{visibleCaptureMethods.map(method => <option key={method} value={method}>{t(`export.capture${method[0].toUpperCase()}${method.slice(1)}`)}</option>)}</select> : <span>{visibleCaptureMethods.length ? t(`export.capture${visibleCaptureMethods[0][0].toUpperCase()}${visibleCaptureMethods[0].slice(1)}`) : t('export.layeredFallback')}</span>}</label>{captureMethod !== 'standard' && <details className="export-method-details"><summary>{t('export.methodDetails')}</summary><p>{t(captureMethod === 'layered' ? 'export.layeredNotice' : captureMethod === 'worker' ? 'export.workerNotice' : captureMethod === 'direct' ? 'export.directNotice' : 'export.nativeNotice')}</p></details>}</>}
+    {mode === 'offline' && captureMethod === 'layered' && (project.template === 'folia-tilt') && <div className="export-text-cache"><label><input type="checkbox" checked={textCache} onChange={event => setTextCache(event.target.checked)}/><span>{t('export.textCache')}</span></label><p className="field-note">{t('export.textCacheNote')}</p></div>}
+    <div className="form-row"><label>{t('export.start')}<input type="number" min="0" step="0.01" value={Number(range.start.toFixed(2))} onChange={e => setRange({ ...range, start: Number(e.target.value) })}/></label><label>{t('export.end')}<input type="number" min="0" step="0.01" max={Number(project.duration.toFixed(2))} value={Number(range.end.toFixed(2))} onChange={e => setRange({ ...range, end: Number(e.target.value) })}/></label></div></fieldset></section><aside className="export-guidance">
+
+    {mode === 'offline' && project.template.startsWith('folia-') && captureMethod !== 'standard' && captureBackend && <p role="status" className="field-note">{t(captureBackend === 'layered' ? 'export.layeredActive' : captureBackend === 'worker' ? 'export.workerActive' : captureBackend === 'direct' ? 'export.directActive' : captureBackend === 'native' ? 'export.nativeActive' : captureMethod === 'layered' ? 'export.layeredFallback' : 'export.nativeFallback')}</p>}
+    <section className="export-preflight"><h3>{t('export.preflight')}</h3><div className="preflight-grid">{checks.map((check, index) => <div key={index} className={check.pending ? 'pending' : check.ok ? 'pass' : 'fail'}>{check.pending ? <Loader2 className="spin" size={14}/> : check.ok ? <CheckCircle2 size={14}/> : <CircleAlert size={14}/>}<span>{check.text}</span></div>)}</div>{estimated && <p><CircleAlert size={13}/>{t('export.estimatedWarning')}</p>}</section>
+    <section className="export-notice" aria-labelledby="export-notice-title"><h3 id="export-notice-title">{t('export.noticeTitle')}</h3><p>{t('export.durationNotice')}</p><p>{t(mode === 'offline' ? 'export.pauseNotice' : 'export.visibilityNotice')}</p><p>{mode === 'offline' ? t('export.limitOffline') : t('export.limitRealtime')}</p></section>
+    {project.template.startsWith('folia-') && <p className="field-note">{mode === 'offline' ? t('export.fastNote') : needsRegion ? t('export.domNote') : t('export.canvasNote')}</p>}
+    {needsRegion && !regionReady && <p role="alert" className="warning">{exportMessage('regionMissing')}</p>}
+    {project.background === 'common' && needsRegion && <p className="field-note">{exportMessage('commonRecording')}</p>}
+    {untimed && <p className="warning">{t('export.untimedWarning')}</p>}{outOfRange && <p className="warning">{t('export.outOfRange')}</p>}{!validRange && <p className="warning">{t('export.rangeInvalid')}</p>}
+    {!support && !error && <p className="field-note">{t('export.detecting')}</p>}{support && !support.mp4 && !support.webm && <p className="warning">{t('export.noCodec')}</p>}
+    </aside></div>
+    {!running && mode === 'offline' && project.template.startsWith('folia-') && visibleCaptureMethods.length > 0 && <div className="export-estimates"><strong>{t('export.estimateTitle')}</strong><dl>{visibleCaptureMethods.map(method => {
+      const seconds = estimatedSeconds(project, { captureMethod: method, textCache: method === 'layered' && textCache && (project.template === 'folia-tilt'), height, fps: 30, start: range.start, end: range.end, format });
+      const duration = (value: number) => `${Math.floor(value / 60)}:${Math.floor(value % 60).toString().padStart(2, '0')}`;
+      return <div key={method}><dt>{t(`export.capture${method[0].toUpperCase()}${method.slice(1)}`)}</dt><dd>{seconds === undefined ? t('export.estimateUnknown') : `≈ ${duration(Math.ceil(seconds / 10) * 10)}`}</dd></div>;
+    })}</dl><p className="field-note">{t('export.estimateNote')}</p></div>}
+    <div className="export-feedback">{running && <div className="export-progress"><progress value={progress} max="1"/><span role="status">{paused ? t('export.paused') : status}</span><b>{Math.round(progress * 100)}%</b></div>}
+    {running && frameStats && <p className="field-note">{t('export.speedStats', { fps: frameStats.fps.toFixed(1), remaining: `${Math.floor(Math.ceil(frameStats.remainingSeconds) / 60)}:${(Math.ceil(frameStats.remainingSeconds) % 60).toString().padStart(2, '0')}` })}</p>}
+    {error && <p role="alert" className="warning">{error}</p>}{artifact && <div className="export-success"><CheckCircle2 size={19}/><span>{artifact.filename} · {(artifact.blob.size / 1024 / 1024).toFixed(1)} MB · {artifact.width} × {artifact.height}</span></div>}
+    {artifact && <><VideoResult blob={artifact.blob} transparent={transparent || artifact.filename.endsWith('_lyrics_alpha.webm')}/><p className="export-retained">{t('export.retained')}</p></>}
+    </div></div><div className="modal-actions export-dialog-footer"><div>{running ? <button onClick={() => controller.current?.abort()}>{t('export.cancel')}</button> : <button onClick={close}>{t('export.back')}</button>}{artifact && !running ? <><button className="discard-export" onClick={() => { if (!confirmDiscard || window.confirm(t('export.discardConfirm'))) setArtifact(null); }}>{t('export.discard')}</button><button disabled={!canExport} onClick={() => void start()}>{t('export.retry')}</button></> : null}</div>{artifact && !running ? <button className="primary" onClick={() => downloadBlob(artifact.blob, artifact.filename)}><ArrowDownToLine size={15}/>{t('export.download')}</button> : <button className="primary" disabled={running || !canExport} onClick={() => void start()}>{running ? <Loader2 className="spin" size={15}/> : <ArrowDownToLine size={15}/>} {running ? t('export.exporting') : t('export.startExport')}</button>}</div>
+  </Modal>;
+}

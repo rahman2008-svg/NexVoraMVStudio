@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en" data-ui-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="theme-color" content="#070a14" />
+    <meta name="color-scheme" content="dark light" />
+    <title>NexVora MV Studio — Lyric Music Video Maker in Your Browser</title>
+    <meta name="description" content="NexVora MV Studio turns songs into glowing, audio-reactive lyric videos. Import audio and lyrics, time every word, and export MP4 or WebM — free, private and fully in your browser. বাংলা ও ইংরেজি।" />
+    <meta name="keywords" content="NexVora MV Studio, lyric video maker, music visualizer, animated lyrics, LRC to video, Bangla lyric video, বাংলা লিরিক ভিডিও" />
+    <meta name="author" content="NexVora Lab's Ofc" />
+    <meta name="robots" content="index, follow" />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="NexVora MV Studio" />
+    <meta property="og:title" content="NexVora MV Studio — Lyric Music Video Maker" />
+    <meta property="og:description" content="Glowing, audio-reactive lyric videos. Free, private, runs in your browser." />
+    <meta name="twitter:card" content="summary" />
+    <style>
+      html,body{margin:0;background:#070a14;color:#e6edf8}
+      .nx-splash{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:14px;background:radial-gradient(60% 50% at 20% 20%,#22d3ee22,transparent),radial-gradient(60% 50% at 80% 80%,#8b5cf622,transparent),#070a14;font-family:system-ui,-apple-system,"Segoe UI","Noto Sans Bengali","Hind Siliguri",sans-serif}
+      .nx-splash strong{font-size:22px;letter-spacing:.02em;color:#e6edf8}.nx-splash strong span{margin-left:6px;background:linear-gradient(90deg,#22d3ee,#8b5cf6);-webkit-background-clip:text;background-clip:text;color:transparent}
+      .nx-splash small{color:#7c8aa5;font-size:13px}
+      .nx-splash-mark{display:flex;align-items:center;gap:5px;height:44px}.nx-splash-mark i{width:6px;height:14px;border-radius:3px;background:linear-gradient(#22d3ee,#8b5cf6);box-shadow:0 0 14px #22d3ee88;animation:nx-bar 1s ease-in-out infinite}
+      .nx-splash-mark i:nth-child(2){animation-delay:.12s}.nx-splash-mark i:nth-child(3){animation-delay:.24s}.nx-splash-mark i:nth-child(4){animation-delay:.36s}.nx-splash-mark i:nth-child(5){animation-delay:.48s}
+      @keyframes nx-bar{0%,100%{height:12px}50%{height:42px}}
+      @media (prefers-reduced-motion:reduce){.nx-splash-mark i{animation:none;height:26px}}
+    </style>
+  </head>
+  <body>
+    <div id="root">
+      <div class="nx-splash" role="status">
+        <span class="nx-splash-mark"><i></i><i></i><i></i><i></i><i></i></span>
+        <strong>NexVora<span>MV Studio</span></strong>
+        <small>Loading… · লোড হচ্ছে…</small>
+      </div>
+      <noscript>
+        <div style="padding:2rem;font-family:sans-serif;max-width:720px;margin:0 auto;line-height:1.6;position:relative">
+          <h1>NexVora MV Studio</h1>
+          <p>Create glowing lyric music videos in your browser. Please enable JavaScript to run NexVora MV Studio.</p>
+        </div>
+      </noscript>
+    </div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,89 @@
+import { describe, expect, it } from 'vitest';
+import { estimateTiming, parseLyrics, toLrc } from '../src/import/lyrics';
+import { defaultProject, templates } from '../src/domain/model';
+import { validateProject } from '../src/persistence/project';
+import { fontFamily } from '../src/fonts/fonts';
+// Source precision, malformed input and boundary times are export-critical contracts.
+describe('lyric import', () => {
+  it('does not invent timing for plain text', () => { const { lines } = parseLyrics('第一句\n第二句', 10); expect(lines).toHaveLength(2); expect(lines[0]).toMatchObject({ start: null, end: null, precision: 'untimed', words: [] }); });
+  it('preserves repeated timestamps, sorts, handles BOM and signed offset', () => { const { lines } = parseLyrics('\uFEFF[offset:-500]\r\n[00:07.00][00:02.00]回声\r\n[00:04.20]城市', 10); expect(lines.map(l => l.start)).toEqual([1.5, 3.7, 6.5]); expect(lines[0].end).toBe(3.7); expect(new Set(lines.map(l => l.id)).size).toBe(3); });
+  it('retains enhanced word timing instead of distributing evenly', () => { const { lines } = parseLyrics('[00:01.00]<00:01.00>风<00:01.20>来了<00:03.50>\n[00:04.00]下一句', 8); expect(lines[0].words).toEqual([{ text: '风', start: 1, end: 1.2 }, { text: '来了', start: 1.2, end: 3.5 }]); });
+  it('retains long gaps by limiting estimated line holds', () => { const { lines } = parseLyrics('[00:00.00]第一句\n[00:20.00]第二句', 30); expect(lines[0].end).toBe(8); });
+  it('makes estimated timing explicit and exports offset only once', () => { const lines = estimateTiming(parseLyrics('a\nb', 10).lines, 10); expect(lines.map(l => l.precision)).toEqual(['estimated', 'estimated']); expect(toLrc(lines, 1)).toBe('[00:01.00]a\n[00:06.00]b'); });
+  it('exports completed word timing as enhanced LRC when requested', () => {
+    const lines = [{ id: 'line-0', text: 'Hello world', start: 1, end: 3, precision: 'manual' as const, words: [{ text: 'Hello', start: 1, end: 1.5 }, { text: 'world', start: 1.5, end: 3 }] }];
+    expect(toLrc(lines, 0.25, true)).toBe('[00:01.25]<00:01.25>Hello <00:01.75>world');
+  });
+  it('ignores metadata and warns on out of range lyrics', () => { const parsed = parseLyrics('[ti:Title]\n[ar:Artist]\n[01:00.00]late', 10); expect(parsed.lines).toHaveLength(1); expect(parsed.warnings[0]).toContain('超出'); });
+});
+describe('project validation', () => {
+  it('roundtrips a valid versioned project', () => { const p = defaultProject(parseLyrics('[00:00.00]Hello', 46).lines); expect(validateProject(JSON.parse(JSON.stringify(p)))).toEqual(p); });
+  it('adds audio visualization defaults to older projects', () => {
+    const saved = { ...defaultProject([]) } as Partial<ReturnType<typeof defaultProject>>;
+    delete saved.audioReactivity; delete saved.audioReactivityAmount; delete saved.monetAudioVisualization; delete saved.monetAudioStyle;
+    expect(validateProject(saved)).toMatchObject({ audioReactivity: 'gentle', audioReactivityAmount: .7, monetAudioVisualization: true, monetAudioStyle: 'bar' });
+  });
+  it('rejects unsupported schema, unbounded geometry and malformed timelines', () => { const p = defaultProject([]); expect(() => validateProject({ ...p, version: 9 })).toThrow(); expect(() => validateProject({ ...p, fontScale: Infinity })).toThrow(); expect(() => validateProject({ ...p, lines: [{ id: 'a', text: 'x', start: 5, end: 2, precision: 'manual', words: [] }] })).toThrow(); });
+});
+
+it('accepts Google and local font selections', () => {
+  expect(validateProject({ ...defaultProject([]), font: 'noto-serif-sc' }).font).toBe('noto-serif-sc');
+  const local = validateProject({ ...defaultProject([]), font: 'local', customFontName: 'My Font' });
+  expect(local.customFontName).toBe('My Font');
+  expect(fontFamily(local)).toBe('My Font');
+});
+
+import { formatCandidateLabel, normalizeEmbedded, realignTimedLinesToPlain } from '../src/import/embedded';
+import i18n from '../src/i18n';
+
+describe('lyric import internationalization', () => {
+  it('provides structured warning keys and translates untimed lyrics notice into English', async () => {
+    await i18n.changeLanguage('en');
+    const parsed = parseLyrics('Line 1\nLine 2', 30);
+    expect(parsed.warningKeys).toHaveLength(1);
+    expect(parsed.warningKeys[0].key).toBe('notice.lyricsWarningUntimed');
+
+    const warningText = i18n.t(parsed.warningKeys[0].key);
+    expect(warningText).toBe('Untimed lyrics need line-by-line timing or estimated timing.');
+    expect(/[\u4e00-\u9fa5]/.test(warningText)).toBe(false);
+
+    const toastMessage = i18n.t('notice.lyricsImported', {
+      count: parsed.lines.length,
+      warning: warningText,
+    });
+    expect(toastMessage).toBe('Imported 2 lyric lines. Untimed lyrics need line-by-line timing or estimated timing.');
+    expect(/[\u4e00-\u9fa5]/.test(toastMessage)).toBe(false);
+  });
+
+  it('formats embedded candidates with localized strings', async () => {
+    await i18n.changeLanguage('en');
+    const candidates = normalizeEmbedded([
+      { timeStampFormat: 2, syncText: [{ text: 'a', timestamp: 1000 }] },
+      { text: 'plain lyrics' }
+    ]);
+    const label = formatCandidateLabel(candidates[0], i18n.t.bind(i18n));
+    expect(label).toBe('Unlabeled · Synchronized snippets (check line breaks)');
+    expect(/[\u4e00-\u9fa5]/.test(label)).toBe(false);
+  });
+});
+
+describe('embedded synchronization', () => {
+  it('aligns per-glyph SYLT to matching unsynchronized line breaks', () => {
+    const candidates = normalizeEmbedded([{ timeStampFormat: 2, syncText: [{text:'风',timestamp:1000},{text:'来',timestamp:1300},{text:'了',timestamp:1600},{text:'你',timestamp:3000},{text:'好',timestamp:3400}] }, {text:'风来了\n你好'}]);
+    const result = parseLyrics(candidates[0].text, 10); expect(result.lines).toHaveLength(2); expect(result.lines[0].text).toBe('风来了'); expect(result.lines[0].words).toHaveLength(3); expect(result.lines[1].start).toBe(3);
+  });
+  it('does not misread MPEG frame timestamps as milliseconds', () => { const c = normalizeEmbedded([{timeStampFormat:1,syncText:[{text:'风',timestamp:1000}]}]); expect(c[0].text).toBe('风'); expect(c[0].label).toContain('需校时'); });
+  it('repairs English provider hard wraps from the embedded plain lyric', () => {
+    const timed = parseLyrics('[00:20.80]We reach the gate as station shutters\n[00:23.10]fall\n[00:24.10]A guard turns the final sign to closed\n[00:37.40]The vending-machine glow colors your sle\n[00:40.60]eve\n[00:41.70]You take a coffee; I do the same', 50).lines;
+    const aligned = realignTimedLinesToPlain(timed, '[Verse 1]\nWe reach the gate as station shutters fall\nA guard turns the final sign to closed\nThe vending-machine glow colors your sleeve\nYou take a coffee; I do the same');
+    expect(aligned?.map(line => line.text)).toEqual(['We reach the gate as station shutters fall', 'A guard turns the final sign to closed', 'The vending-machine glow colors your sleeve', 'You take a coffee; I do the same']);
+    expect(aligned?.map(line => [line.start, line.end])).toEqual([[20.8, 24.1], [24.1, 32.1], [37.4, 41.7], [41.7, 49.7]]);
+  });
+});
+
+it('persists every selectable Folia mode without losing its identity', () => {
+ for (const {id} of templates) {
+  const project = {...defaultProject([]), template:id};
+  expect(validateProject(JSON.parse(JSON.stringify(project))).template).toBe(id);
+ }
+});

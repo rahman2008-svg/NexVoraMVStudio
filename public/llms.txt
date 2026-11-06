@@ -1,0 +1,10 @@
+# NexVora MV Studio
+> NexVora MV Studio is an open-source (AGPL-3.0-only), local-first web application for creating animated lyric videos. Audio, lyrics and projects stay in the browser. No account or API key is required.
+
+NexVora MV Studio is a modified version of UseSuno MV Studio (https://github.com/UseSuno/UseSunoMVStudio), developed by Prince AR Abdur Rahman and published by NexVora Lab's Ofc.
+
+- Main application: /
+- Lyrics timing editor: /timestamp.html
+- Privacy policy: /privacy.html
+- Open-source licenses: /licenses.html
+- Corresponding source of this build: /source/verse-studio-source.zip
